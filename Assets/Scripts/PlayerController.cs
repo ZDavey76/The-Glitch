@@ -6,27 +6,13 @@ public class PlayerController : MonoBehaviour
     PlayerInputActions playerInput;
     CharacterController characterController;
 
-    //looking
-    public InputActionReference lookAction;
-    public float moveSpeed = 2.5f;
-
-    private Vector2 rotStore;
-    public float lookSpeed;
-    public Camera theCam;
-
-    public float camZoomNormal = 60f;
-    public float camZoomOut = 75f;
-    public float camZoomSpeed = 5f;
-
     //move plus run
     Vector2 currentMovementInput;
     Vector3 currentMovement;
     Vector3 currentRunMovement;
     bool isMovementPressed;
     bool isRunPressed;
-    public float runMultiplier;
-
-    public InputActionReference sprintAction;
+    float runMultiplier = 7.5f;
 
     //gravity
     float groundedGravity = -0.05f;
@@ -41,19 +27,14 @@ public class PlayerController : MonoBehaviour
 
     [Header("Push Settings")]
     [SerializeField] float pushStrength = 2.5f;
-    [SerializeField] float maxPushMass = 200f;
-    [SerializeField] bool onlyHorizontalPush = true;
-    [SerializeField] float wallDamping = 0.6f;
-
-    void Start()
-    {
-        Cursor.lockState = CursorLockMode.Locked;
-        Cursor.visible = false;
-    }
+    [SerializeField] float maxPushMass = 200f;    // ignore very heavy bodies
+    [SerializeField] bool onlyHorizontalPush = true; // avoid launching things upward
+    [SerializeField] float wallDamping = 0.6f;    // reduce impulse when running straight into a wall
 
     float CurrentPlanarSpeed()
     {
-        Vector3 v = characterController.velocity;
+        // Use the same vector you pass to Move() so walking vs. sprinting feels different
+        Vector3 v = isRunPressed ? currentRunMovement : currentMovement;
         v.y = 0f;
         return v.magnitude;
     }
@@ -61,19 +42,26 @@ public class PlayerController : MonoBehaviour
     void OnControllerColliderHit(ControllerColliderHit hit)
     {
         var rb = hit.rigidbody;
-        if (!rb || rb.isKinematic) return;
-        if (rb.mass > maxPushMass) return;
+        if (!rb || rb.isKinematic) return;        // nothing to push
+        if (rb.mass > maxPushMass) return;        // too heavy
 
+        // Direction we moved into the object from Unity's collision info
         Vector3 pushDir = hit.moveDirection;
 
-        if (onlyHorizontalPush && pushDir.y > -0.2f) 
-            pushDir.y = 0f;
+        // Keep push horizontal so jumps/ledges don't yeet props
+        if (onlyHorizontalPush && pushDir.y > -0.2f) pushDir.y = 0f;
 
+        // Scale by our current speed for natural feel (walk < run)
         float speed = CurrentPlanarSpeed();
-        float facingWall = 1f - Mathf.Clamp01(Mathf.Abs(hit.normal.y) * 5f);
+
+        // If we're basically hitting a wall (normal ~ horizontal), damp the shove a bit
+        float facingWall = 1f - Mathf.Clamp01(Mathf.Abs(hit.normal.y) * 5f); // 1 when vertical surface
         float damping = Mathf.Lerp(1f, wallDamping, facingWall);
 
+        // Build the impulse
         Vector3 impulse = pushDir.normalized * pushStrength * speed * damping;
+
+        // Apply at the contact point for nicer torque on tall objects
         rb.AddForceAtPosition(impulse, hit.point, ForceMode.Impulse);
     }
 
@@ -90,6 +78,7 @@ public class PlayerController : MonoBehaviour
         playerInput.PlayerControls.Run.canceled += onRun;
         playerInput.PlayerControls.Jump.started += onJump;
         playerInput.PlayerControls.Jump.canceled += onJump;
+
     }
 
     void handleJump()
@@ -116,6 +105,10 @@ public class PlayerController : MonoBehaviour
     void onMovementInput(InputAction.CallbackContext context)
     {
         currentMovementInput = context.ReadValue<Vector2>();
+        currentMovement.x = currentMovementInput.x * 5f;
+        currentMovement.z = currentMovementInput.y * 5f;
+        currentRunMovement.x = currentMovementInput.x * runMultiplier;
+        currentRunMovement.z = currentMovementInput.y * runMultiplier;
         isMovementPressed = currentMovementInput.x != 0 || currentMovementInput.y != 0;
     }
 
@@ -128,11 +121,8 @@ public class PlayerController : MonoBehaviour
     {
         if (characterController.isGrounded)
         {
-            // Small negative value to keep grounded
-            if (currentMovement.y < 0)
-                currentMovement.y = groundedGravity;
-            if (currentRunMovement.y < 0)
-                currentRunMovement.y = groundedGravity;
+            currentMovement.y = groundedGravity;
+            currentRunMovement.y = groundedGravity;
         }
         else
         {
@@ -146,50 +136,19 @@ public class PlayerController : MonoBehaviour
         isJumpPressed = context.ReadValueAsButton();
     }
 
+    // Update is called once per frame
     void Update()
     {
-        // 1) Handle gravity and jumping
+        if (isRunPressed)
+        {
+            characterController.Move(currentRunMovement * Time.deltaTime);
+        }
+        else
+        {
+            characterController.Move(currentMovement * Time.deltaTime);
+        }
         handleGravity();
         handleJump();
-
-        // 2) Build horizontal movement relative to player facing
-        Vector3 forward = transform.forward;
-        Vector3 right = transform.right;
-        Vector3 horizontalMove = forward * currentMovementInput.y + right * currentMovementInput.x;
-
-        // 3) Determine speed (walk or sprint)
-        bool isSprinting = sprintAction.action.IsPressed() && isMovementPressed;
-        float currentSpeed = isSprinting ? (moveSpeed * runMultiplier) : moveSpeed;
-
-        // 4) DON'T normalize yet - we need magnitude for pushing
-        // Only normalize if there's input to avoid divide-by-zero
-        if (horizontalMove.magnitude > 0.01f)
-        {
-            horizontalMove = horizontalMove.normalized * currentSpeed;
-        }
-
-        // 5) Preserve vertical velocity from gravity/jump
-        horizontalMove.y = currentMovement.y;
-
-        // 6) Update currentMovement and currentRunMovement for push physics
-        currentMovement = horizontalMove;
-        currentRunMovement = horizontalMove;
-
-        // 7) Move the character (this triggers OnControllerColliderHit for pushing)
-        characterController.Move(horizontalMove * Time.deltaTime);
-
-        // 8) Handle camera FOV zoom for sprint
-        float targetFOV = (isSprinting && isMovementPressed) ? camZoomOut : camZoomNormal;
-        theCam.fieldOfView = Mathf.Lerp(theCam.fieldOfView, targetFOV, Time.deltaTime * camZoomSpeed);
-
-        // 9) Handle camera look
-        Vector2 lookInput = lookAction.action.ReadValue<Vector2>();
-        lookInput.y = -lookInput.y;
-        rotStore = rotStore + (lookInput * lookSpeed * Time.deltaTime);
-        rotStore.y = Mathf.Clamp(rotStore.y, -90f, 90f);
-        
-        transform.rotation = Quaternion.Euler(0f, rotStore.x, 0f);
-        theCam.transform.localRotation = Quaternion.Euler(rotStore.y, 0f, 0f);
     }
     private void OnEnable()
     {
@@ -201,3 +160,4 @@ public class PlayerController : MonoBehaviour
         playerInput.PlayerControls.Disable();
     }
 }
+
